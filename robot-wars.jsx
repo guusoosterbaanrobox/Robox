@@ -494,7 +494,7 @@ function loadCachedTexture(url) {
   if (cached) return Promise.resolve(cached);
   return new Promise((resolve) => {
     new THREE.TextureLoader().load(url, (tex) => {
-      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.encoding = THREE.sRGBEncoding;
       _textureCache.set(url, tex);
       resolve(tex);
     });
@@ -773,7 +773,8 @@ function Isometric3DCube({ part, pixelSize = 96, spin = true, frustum = 1.35 }) 
     camera.position.set(camDist, camDist, camDist);
     camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
+    renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(pixelSize, pixelSize);
     mount.innerHTML = "";
@@ -856,7 +857,7 @@ function Isometric3DCube({ part, pixelSize = 96, spin = true, frustum = 1.35 }) 
     const FACES = ["right", "left", "top", "bottom", "front", "back"];
 
     const materials = FACES.map(
-      (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.5, metalness: 0.2 })
+      (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.6, metalness: 0.05 })
     );
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const mesh = new THREE.Mesh(geometry, materials);
@@ -1072,7 +1073,8 @@ function TablePartsScene({ parts, pixelSize = 54, onPartClick, clickable, maxRow
     camera.position.set(3, 3, 3);
     camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
+    renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.domElement.style.width = "100%";
     renderer.domElement.style.height = "100%";
@@ -1192,7 +1194,7 @@ function TablePartsScene({ parts, pixelSize = 54, onPartClick, clickable, maxRow
         const c = colorInfo(part.color);
         const baseColor = new THREE.Color(c.hex);
         const materials = FACES.map(
-          (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.5, metalness: 0.2 })
+          (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.6, metalness: 0.05 })
         );
         const geometry = new THREE.BoxGeometry(1, 1, 1);
         const mesh = new THREE.Mesh(geometry, materials);
@@ -1324,7 +1326,8 @@ function Isometric3DRobot({ robot, facing = "right", dim = false, fallen = false
     camera.position.set(camDist, camDist, camDist);
     camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
+    renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(renderResW, renderResH, false);
     renderer.domElement.style.width = "100%";
@@ -1414,7 +1417,7 @@ function Isometric3DRobot({ robot, facing = "right", dim = false, fallen = false
       // Build with flat-shaded placeholders first so the robot paints
       // instantly; real art swaps in per-face as each texture resolves.
       const materials = FACE_FOR_INDEX.map(
-        (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.5, metalness: 0.2 })
+        (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.6, metalness: 0.05 })
       );
       const mesh = new THREE.Mesh(geometry, materials);
       mesh.position.y = positions[t];
@@ -1572,7 +1575,8 @@ function DiceColumnScene({ robot, dice, side, revealed }) {
     camera.position.set(3, 3, 3);
     camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
+    renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(PIXEL, Math.round(PIXEL * (halfH / halfW)), false);
     renderer.domElement.style.width = "100%";
@@ -1662,9 +1666,9 @@ function DiceColumnScene({ robot, dice, side, revealed }) {
 
       const c = colorInfo(part.color);
       const baseColor = new THREE.Color(c.hex);
-      const sideMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.82), roughness: 0.55, metalness: 0.25 });
-      const bottomMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.55), roughness: 0.6, metalness: 0.2 });
-      const facePlaceholder = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.9), roughness: 0.5, metalness: 0.2 });
+      const sideMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.82), roughness: 0.65, metalness: 0.08 });
+      const bottomMat = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.55), roughness: 0.7, metalness: 0.05 });
+      const facePlaceholder = new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(0.9), roughness: 0.6, metalness: 0.05 });
       const geometry = new THREE.BoxGeometry(1, 1, 1);
       // Face order +x,-x,+y,-y,+z,-z - the result face sits on +y (the "lid").
       const mesh = new THREE.Mesh(geometry, [sideMat, sideMat, facePlaceholder, bottomMat, sideMat, sideMat]);
@@ -1675,7 +1679,7 @@ function DiceColumnScene({ robot, dice, side, revealed }) {
       if (texUrl) {
         loadCachedTexture(texUrl).then((texture) => {
           if (!texture) return;
-          mesh.material[2] = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.5, metalness: 0.15 });
+          mesh.material[2] = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.6, metalness: 0.05 });
           mesh.material.needsUpdate = true;
           st.renderer.render(st.scene, st.camera);
         });
@@ -2333,8 +2337,6 @@ export default function RobotWars() {
         .text-normal-dark { color: #333333; font-size: 18px; }
         .text-normal-light { color: #ffffff; font-size: 18px; }
         .grid-bg {
-          background-image: linear-gradient(rgba(0,0,0,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(0,0,0,0.06) 1px, transparent 1px);
-          background-size: 22px 22px;
         }
         @keyframes fastPulse {
           0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.9); transform: scale(1); }
@@ -3513,7 +3515,8 @@ const ArmyQueueScene = forwardRef(function ArmyQueueScene({ ws, indices, align =
     camera.position.set(camDist, camDist, camDist);
     camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
+    renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     const renderResW = 1200;
     const renderResH = Math.round(renderResW * (halfH / halfW));
@@ -3662,7 +3665,7 @@ function buildQueueRobotGroup(robot, facing, onTextureLoaded) {
       const c = colorInfo(part.color);
       const baseColor = new THREE.Color(c.hex);
       materials = FACE_FOR_INDEX.map(
-        (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.5, metalness: 0.2 })
+        (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.6, metalness: 0.05 })
       );
     }
     const mesh = new THREE.Mesh(geometry, materials);
@@ -3731,7 +3734,8 @@ const ScoreTallyScene = forwardRef(function ScoreTallyScene({ ws, results, revea
     camera.position.set(camDist, camDist, camDist);
     camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, premultipliedAlpha: false });
+    renderer.outputEncoding = THREE.sRGBEncoding;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     const renderResW = 1200;
     const renderResH = Math.round(renderResW * (halfH / halfW));

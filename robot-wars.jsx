@@ -304,7 +304,7 @@ const COLORS = [
   { key: "green", tier: 3, hex: "#1f8a4c", ring: "#145c32", text: "#fff", label: "GREEN" },
   { key: "pink", tier: 4, hex: "#d94f93", ring: "#8f3162", text: "#fff", label: "PINK" },
   { key: "yellow", tier: 5, hex: "#e0b400", ring: "#8f7300", text: "#232000", label: "YELLOW" },
-  { key: "golden", tier: 6, hex: "#e0a800", ring: "#8a6600", text: "#2b1e00", label: "GOLDEN" },
+  { key: "golden", tier: 6, hex: "#ffffff", ring: "#c9a227", text: "#7a5c00", label: "GOLDEN" },
 ];
 const COLOR_COUNT = { golden: 1, black: 2, red: 2, blue: 3, green: 3, pink: 4, yellow: 4 };
 const TYPES = ["head", "body", "feet"];
@@ -569,8 +569,14 @@ function evaluateRobot(robot) {
     else if (counts[c] === counts[dominant] && colorInfo(c).tier < colorInfo(dominant).tier) dominant = c;
   });
   const dominantTier = colorInfo(dominant).tier;
+  // Each part's value: strongest color (black, tier 0) is worth the most,
+  // weakest (golden, tier 6) the least - matching "golden parts are the
+  // weakest color" (a golden robot only wins by being built correctly and
+  // single-color, via isGoldenRobot's separate instant-win check; on raw
+  // color value alone it's the worst thing to have).
+  const totalValue = colors.reduce((sum, c) => sum + (COLORS.length - 1 - colorInfo(c).tier), 0);
   const rankTuple = [correctOrder ? 1 : 0, singleColor ? 1 : 0, COLORS.length - 1 - dominantTier, counts[dominant]];
-  return { singleColor, correctOrder, dominant, dominantCount: counts[dominant], rankTuple, colorsByPos: colors };
+  return { singleColor, correctOrder, dominant, dominantCount: counts[dominant], totalValue, rankTuple, colorsByPos: colors };
 }
 
 // Special rule: a robot built from exactly two parts of the same color plus
@@ -588,6 +594,8 @@ function oddColorOut(evalr, pair) {
   return evalr.colorsByPos.find((c) => c !== pair);
 }
 
+
+
 const scalar = (tuple) => tuple[0] * 10000 + tuple[1] * 1000 + tuple[2] * 100 + tuple[3];
 
 // Instant-win condition: a fully correct, single-color golden robot.
@@ -603,8 +611,13 @@ function findGoldenBay(workshop) {
 function playColorChime(robot) {
   const evalr = evaluateRobot(robot);
   if (!evalr) return;
-  if (evalr.singleColor) SFX.singleColor();
-  else SFX.mixedColor();
+  // The positive chime is meant to celebrate a genuinely complete robot -
+  // same color AND every part seated in its correct slot - not just same
+  // color with parts scrambled across the wrong slots. A scrambled
+  // single-color robot isn't "mixed" either, so it gets no chime at all
+  // rather than incorrectly playing the mixed-color cue.
+  if (evalr.singleColor && evalr.correctOrder) SFX.singleColor();
+  else if (!evalr.singleColor) SFX.mixedColor();
 }
 
 // Rule: a fully correct, single-color golden robot wins instantly - handled
@@ -631,7 +644,9 @@ function playColorChime(robot) {
 // the winner (lower tier index = stronger color, e.g. black beats yellow).
 // Rule: a mixed robot with 2 matching part colors always beats a mixed robot
 // with 3 different colors, regardless of which colors are involved.
-// Otherwise fall back to dominant-color tier as the final tiebreak.
+// Otherwise fall back to each robot's total color value (the sum of all 3
+// parts' worth) as the final tiebreak - the robot with the most valuable
+// colors overall wins.
 function compareRobots(a, b) {
   const pairA = pairColor(a);
   const pairB = pairColor(b);
@@ -659,11 +674,16 @@ function compareRobots(a, b) {
     }
   }
 
-  if (a.dominantCount !== b.dominantCount) return a.dominantCount > b.dominantCount ? 1 : -1;
-
-  const dta = colorInfo(a.dominant).tier;
-  const dtb = colorInfo(b.dominant).tier;
-  if (dta !== dtb) return dta < dtb ? 1 : -1;
+  // Final tiebreak for two mixed robots that none of the special cases
+  // above resolved: compare their OVERALL color value - the sum of all 3
+  // parts' worth (black highest, golden lowest) - rather than which color
+  // merely repeats most often. The old version checked dominantCount
+  // first, which meant e.g. two weak golden parts (a repeated but low-
+  // value color) could out-rank a robot holding one part each of black,
+  // red, and blue - genuinely more valuable colors that just don't
+  // repeat. Golden parts are the weakest color and should never win a
+  // mixed fight on the strength of merely appearing twice.
+  if (a.totalValue !== b.totalValue) return a.totalValue > b.totalValue ? 1 : -1;
   return 0;
 }
 
@@ -856,9 +876,10 @@ function Isometric3DCube({ part, pixelSize = 96, spin = true, frustum = 1.35 }) 
     // front face) since real art exists for all 6 sides.
     const FACES = ["right", "left", "top", "bottom", "front", "back"];
 
-    const materials = FACES.map(
-      (face) => new THREE.MeshStandardMaterial({ color: baseColor.clone().multiplyScalar(shade[face]), roughness: 0.6, metalness: 0.05 })
-    );
+    const materials = FACES.map((face) => {
+      const shadedColor = baseColor.clone().multiplyScalar(shade[face]);
+      return new THREE.MeshStandardMaterial({ color: shadedColor, roughness: 0.6, metalness: 0.05 });
+    });
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const mesh = new THREE.Mesh(geometry, materials);
     st.group.clear();
@@ -3374,71 +3395,54 @@ function BattleView({ battle, playerWs, aiWs, revealCount, setRevealCount, onRes
         ) : null}
       </div>
 
-      {/* Fight button, flanked by each side's running score tally - same
-          3D scenes, sizing, and positioning convention as the army queue
-          above, just anchored at the bottom and append-only. The button
-          slot is a fixed-width placeholder that's always present (even
-          when empty, between fights) so the two tallies never shift
-          sideways just because the button popped in or out.
-          Each tally sits in a flex-1 min-w-0 slot (same responsive
-          pattern as the army queue row above) rather than a fixed pixel
-          width - a fixed width here, plus the button's own fixed width,
-          summed to more than a phone screen's width, pushing each tally's
-          near-center edge (where slot 0 sits) far out from center and
-          leaving no real room within the viewport for icons further down
-          the row. Letting each side claim whatever space is actually
-          available, right up against the button, gives the icons genuine
-          room to spread toward the edges instead of overflowing off them. */}
-      <div className="w-full flex items-center justify-center gap-2 mt-2 px-3">
+      {/* Each side's running score tally, full-width flex-1 split just
+          like the army queue row above (so the robots render at the same
+          size), with the Fight/Play Again button on its own centered row
+          underneath rather than overlapping the tallies horizontally.
+          It used to sit as a flex sibling *between* the tallies (eating
+          into their width) or, briefly, absolutely centered *over* them
+          (which then overlapped the first icon on each side once a side
+          had actually won a bay) - stacking it below sidesteps both
+          problems: tallies keep their full width/size, and the button
+          never covers a robot. */}
+      <div className="w-full flex items-start justify-between gap-2 px-3 mt-2" style={{ minHeight: 68 }}>
         <div className="flex-1 min-w-0 flex justify-end">
           <ScoreTallyScene ws={playerWs} results={results} revealCount={completedCount} winnerKey="player" align="left" ref={playerTallyRef} />
-        </div>
-        <div
-          className="flex items-center justify-center shrink-0 h-16"
-          // h-16 matches the buttons' own height and is reserved
-          // unconditionally, even while neither button is rendered (e.g.
-          // mid-entrance, or while a bay is armed) - otherwise this slot
-          // collapses to 0 height whenever it's briefly empty, shrinking
-          // the whole row (items-center) down to the tallies' own shorter
-          // height and shifting the entire score row up and down as the
-          // button pops in and out.
-          // The Fight! button keeps a fixed placeholder width so the row
-          // doesn't jump sideways while it's toggling in and out between
-          // bays. PLAY AGAIN only ever appears once, right as the game
-          // ends - which is the exact same moment the 7th (final) icon
-          // needs to appear in both tallies - so there's no "shift" to
-          // avoid here; shrinking this button's own footprint at that
-          // point is what actually frees the room those last two icons
-          // need. `undefined` width plus tighter padding lets it size to
-          // its own text instead of the wider Fight!-sized box.
-          style={{ width: gameOver ? undefined : 150 }}
-        >
-          {!gameOver && currentBay && !currentBay.isTie && !entering && !armed && (
-            <button
-              onClick={() => {
-                primeSpeech();
-                setArmed(true);
-              }}
-              className="btn-primary btn-fight-pulse px-6 h-16"
-            >
-              Fight!
-              <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                <div className="shine-sweep" />
-              </div>
-            </button>
-          )}
-          {gameOver && (
-            <button onClick={onReset} className="btn-primary px-2 h-16 whitespace-nowrap">
-              PLAY AGAIN
-              <div className="absolute inset-0 pointer-events-none overflow-hidden">
-                <div className="shine-sweep" />
-              </div>
-            </button>
-          )}
         </div>
         <div className="flex-1 min-w-0 flex justify-start">
           <ScoreTallyScene ws={aiWs} results={results} revealCount={completedCount} winnerKey="ai" align="right" ref={aiTallyRef} />
         </div>
+      </div>
+      <div
+        className="flex items-center justify-center shrink-0 h-16 mt-1"
+        // h-16 matches the buttons' own height and is reserved
+        // unconditionally, even while neither button is rendered (e.g.
+        // mid-entrance, or while a bay is armed) - otherwise this row
+        // collapses to 0 height whenever it's briefly empty, shifting
+        // the rest of the layout up and down as the button pops in and out.
+      >
+        {!gameOver && currentBay && !currentBay.isTie && !entering && !armed && (
+          <button
+            onClick={() => {
+              primeSpeech();
+              setArmed(true);
+            }}
+            className="btn-primary btn-fight-pulse px-6 h-16"
+          >
+            Fight!
+            <div className="absolute inset-0 pointer-events-none overflow-hidden">
+              <div className="shine-sweep" />
+            </div>
+          </button>
+        )}
+        {gameOver && (
+          <button onClick={onReset} className="btn-primary px-2 h-16 whitespace-nowrap">
+            PLAY AGAIN
+            <div className="absolute inset-0 pointer-events-none overflow-hidden">
+              <div className="shine-sweep" />
+            </div>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -3838,7 +3842,7 @@ const ScoreTallyScene = forwardRef(function ScoreTallyScene({ ws, results, revea
     },
   }));
 
-  return <div ref={mountRef} style={{ width: "100%", maxWidth: 150, aspectRatio: `${2 * halfW} / ${2 * halfH}` }} />;
+  return <div ref={mountRef} style={{ width: "100%", maxWidth: 220, aspectRatio: `${2 * halfW} / ${2 * halfH}` }} />;
 });
 
 // Grows an element in from a real, previously-measured screen position

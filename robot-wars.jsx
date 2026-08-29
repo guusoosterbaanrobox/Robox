@@ -1892,6 +1892,7 @@ export default function RobotWars() {
   const [revealCount, setRevealCount] = useState(0);
   const [showRules, setShowRules] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(false);
   const actingRef = useRef(false);
   // Refs used purely to measure screen positions for the "drawn part flies
   // into its bay slot" animation: drawnPartRef points at whichever of the
@@ -2365,6 +2366,26 @@ export default function RobotWars() {
         }
         .pulse-fast { animation: fastPulse 0.55s ease-in-out infinite; }
 
+        /* ---- Tutorial overlay ---- */
+        @keyframes tutorialTargetPulse {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.7); }
+          50% { box-shadow: 0 0 0 8px rgba(251,191,36,0); }
+        }
+        .tutorial-pulse { animation: tutorialTargetPulse 1s ease-in-out infinite; }
+        @keyframes tutorialShake {
+          0%, 100% { transform: translateX(0); }
+          20% { transform: translateX(-4px); }
+          40% { transform: translateX(4px); }
+          60% { transform: translateX(-3px); }
+          80% { transform: translateX(3px); }
+        }
+        .tutorial-shake { animation: tutorialShake 0.4s ease-in-out; }
+        @keyframes tutorialArrowBounce {
+          0%, 100% { transform: translateX(0); }
+          50% { transform: translateX(4px); }
+        }
+        .tutorial-arrow { animation: tutorialArrowBounce 0.7s ease-in-out infinite; }
+
         /* ---- Button system ---- */
         @keyframes btnColorPulse {
           0%, 100% { background: #DC5041; }
@@ -2645,6 +2666,7 @@ export default function RobotWars() {
             rather than inside the scaled/transformed subtree below. */}
         {flyingPart && <FlyingPart key={flyingPart.id} {...flyingPart} onDone={() => setFlyingPart(null)} />}
         {showRules && <RulesOverlay onClose={() => setShowRules(false)} />}
+        {showTutorial && <TutorialOverlay onClose={() => setShowTutorial(false)} />}
         {showMenu && (
           <MenuPanel
             onClose={() => setShowMenu(false)}
@@ -2655,6 +2677,10 @@ export default function RobotWars() {
             onRules={() => {
               setShowMenu(false);
               setShowRules(true);
+            }}
+            onTutorial={() => {
+              setShowMenu(false);
+              setShowTutorial(true);
             }}
             onQuit={() => {
               setShowMenu(false);
@@ -3097,7 +3123,7 @@ function quitApp() {
 // Mirrors RulesOverlay's own enter/exit timing (200ms) so the two overlays
 // feel consistent, just sliding from the right edge instead of fading the
 // alert-text banner.
-function MenuPanel({ onClose, onRestart, onRules, onQuit }) {
+function MenuPanel({ onClose, onRestart, onRules, onTutorial, onQuit }) {
   const [closing, setClosing] = useState(false);
 
   function handleClose() {
@@ -3135,6 +3161,12 @@ function MenuPanel({ onClose, onRestart, onRules, onQuit }) {
           className="text-left px-4 py-4 text-white border-b border-zinc-800 hover:bg-white/5 active:bg-white/10 transition-colors"
         >
           RULES
+        </button>
+        <button
+          onClick={() => pick(onTutorial)}
+          className="text-left px-4 py-4 text-white border-b border-zinc-800 hover:bg-white/5 active:bg-white/10 transition-colors"
+        >
+          TUTORIAL
         </button>
         <button
           onClick={() => pick(onQuit)}
@@ -3207,6 +3239,222 @@ function RulesOverlay({ onClose }) {
           <p>6. Otherwise, the stronger dominant color wins.</p>
           <p>7. Still tied? Both robots' 3 parts are cast like dice - whoever lands more parts face-up wins.</p>
         </RuleSection>
+      </div>
+    </div>
+  );
+}
+
+// Two-step walkthrough. Step 1: build one red robot, part-by-part, exactly
+// like the real Phase 1 draw display (Isometric3DCube + the 3-square type
+// indicator to its side) - the player places it by tapping a slot on the
+// bay below, no separate 2D tap-to-select step. Step 2: build a mixed
+// red/blue/green robot the same way, then watch it fight a single-color
+// (red) robot and lose, driving home the "pure color beats mixed color"
+// rule. Deliberately reimplements its own minimal bay/slot markup rather
+// than reusing RobotBay - it needs per-slot-type gating (tapping a slot
+// that doesn't match the current part's type doesn't place it) and a
+// pulsing "place it here" highlight + arrow on just the correct slot,
+// neither of which RobotBay has any concept of. The fight itself reuses
+// RobotSummary/Isometric3DRobot directly - the same components (and the
+// same "exploding" stage + fallen pose) the real battle screen uses.
+const TUTORIAL_STEP_COLORS = {
+  1: { head: "red", body: "red", feet: "red" },
+  2: { head: "red", body: "blue", feet: "green" },
+};
+
+function TutorialOverlay({ onClose }) {
+  const [closing, setClosing] = useState(false);
+  const [step, setStep] = useState(1);
+  const [phase, setPhase] = useState("build"); // step 2 only: "build" | "fight"
+  const [placed, setPlaced] = useState({ head: null, body: null, feet: null });
+  const [wrongSlot, setWrongSlot] = useState(null);
+  const wrongTimerRef = useRef(null);
+  const [fightStage, setFightStage] = useState("idle"); // "idle" | "exploding" | "removed"
+  const opponentRobot = useRef({
+    head: { id: "opp-head", color: "red", type: "head" },
+    body: { id: "opp-body", color: "red", type: "body" },
+    feet: { id: "opp-feet", color: "red", type: "feet" },
+  }).current;
+
+  useEffect(() => () => wrongTimerRef.current && clearTimeout(wrongTimerRef.current), []);
+
+  // Drives the fight sequence once step 2 reaches its "fight" phase -
+  // same beats (explode, then settle fallen) as the real battle screen.
+  useEffect(() => {
+    if (step !== 2 || phase !== "fight") return;
+    const t1 = setTimeout(() => setFightStage("exploding"), 600);
+    const t2 = setTimeout(() => setFightStage("removed"), 1300);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [step, phase]);
+
+  function handleClose() {
+    setClosing(true);
+    setTimeout(onClose, 200);
+  }
+
+  function goToStep2() {
+    setStep(2);
+    setPlaced({ head: null, body: null, feet: null });
+    setWrongSlot(null);
+  }
+
+  const stepColors = TUTORIAL_STEP_COLORS[step];
+  const parts = TYPES.map((t) => ({ id: `s${step}-${t}`, color: stepColors[t], type: t }));
+  const complete = TYPES.every((t) => placed[t]);
+  // The one part currently "drawn" and awaiting placement - the first (in
+  // head/body/feet order) that hasn't been placed yet. There's always
+  // exactly one of these until the robot is complete, same as the real
+  // game's drawnPart.
+  const currentPart = parts.find((p) => !placed[p.type]) || null;
+
+  function tapSlot(type) {
+    if (!currentPart || placed[type]) return;
+    if (currentPart.type === type) {
+      setPlaced((prev) => ({ ...prev, [type]: currentPart }));
+      setWrongSlot(null);
+    } else {
+      setWrongSlot(type);
+      if (wrongTimerRef.current) clearTimeout(wrongTimerRef.current);
+      wrongTimerRef.current = setTimeout(() => setWrongSlot(null), 900);
+    }
+  }
+
+  const showBuild = step === 1 || phase === "build";
+  const sectionTitle = step === 1 ? "STEP 1: BUILD A ROBOT" : "STEP 2: MIX YOUR COLORS";
+
+  let instruction;
+  if (showBuild) {
+    if (complete) {
+      instruction =
+        step === 1
+          ? "That's a complete robot - head, body, and feet all correctly placed."
+          : "Red head, blue body, green feet - a mixed-color robot. Let's see how it does in a fight.";
+    } else {
+      instruction = `Tap the ${colorInfo(currentPart.color).label} ${TYPE_LABEL[currentPart.type]} slot to place it.`;
+    }
+  } else {
+    instruction =
+      fightStage === "removed"
+        ? "Single-color robots always beat multi-colored robots."
+        : "Watch what happens when a mixed robot meets a single-color robot.";
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/75 flex items-start sm:items-center justify-center p-3 overflow-y-auto"
+      onClick={handleClose}
+    >
+      <div
+        className="bg-white border border-zinc-300 rounded-lg max-w-lg w-full my-6 p-5 overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4 gap-4">
+          <h2 className={`alert-text ${closing ? "alert-text-exit" : "alert-text-enter"}`} style={{ fontSize: "clamp(28px, 8vw, 64px)" }}>
+            TUTORIAL
+          </h2>
+          <button onClick={handleClose} className="btn-tertiary px-3 py-1 shrink-0">
+            CLOSE
+          </button>
+        </div>
+
+        <div className="mb-5">
+          <div className="text-zinc-900 font-bold text-xs tracking-[0.15em] mb-2">{sectionTitle}</div>
+          <div className="text-zinc-700 text-sm leading-relaxed">
+            <p>{instruction}</p>
+          </div>
+        </div>
+
+        {showBuild ? (
+          complete ? (
+            <div className="flex flex-col items-center gap-4 py-2">
+              <Isometric3DRobot robot={placed} facing="right" pixelWidth={148} pixelHeight={213} />
+              <button onClick={step === 1 ? goToStep2 : () => setPhase("fight")} className="btn-primary px-6 py-2">
+                {step === 1 ? "NEXT" : "FIGHT!"}
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-6 py-2">
+              {/* Big rotating 3D part + type indicator - mirrors the real
+                  Phase 1 drawn-part display exactly. */}
+              <div className="flex items-center gap-4">
+                <div key={currentPart.id} className="drop-shadow-xl zoom-pop">
+                  <Isometric3DCube part={currentPart} pixelSize={200} />
+                </div>
+                <div className="flex flex-col divide-y divide-zinc-300">
+                  {TYPES.map((t) =>
+                    t === currentPart.type ? (
+                      <Cube key={t} part={currentPart} size="sm" />
+                    ) : (
+                      <div key={t} className="w-8 h-8" style={{ background: "#d3d3d3" }} />
+                    )
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-col divide-y divide-white bg-zinc-900/60 overflow-hidden">
+                {TYPES.map((t) => {
+                  const isTarget = currentPart.type === t && !placed[t];
+                  const isFilled = !!placed[t];
+                  return (
+                    <div key={t} className="flex items-stretch">
+                      <div className="w-7 flex items-center justify-center shrink-0">
+                        {isTarget && (
+                          <svg viewBox="0 0 24 24" width="20" height="20" className="tutorial-arrow">
+                            <path
+                              d="M2 12h14M10 5l7 7-7 7"
+                              stroke="#fbbf24"
+                              strokeWidth="3"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              fill="none"
+                            />
+                          </svg>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => tapSlot(t)}
+                        disabled={isFilled}
+                        className={`transition-transform ${
+                          isTarget ? "cursor-pointer ring-2 ring-amber-400 tutorial-pulse" : isFilled ? "cursor-default" : "cursor-pointer ring-1 ring-white/20"
+                        } ${wrongSlot === t ? "tutorial-shake" : ""}`}
+                      >
+                        <Cube part={placed[t]} size="bay" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )
+        ) : (
+          <div className="flex flex-col items-center gap-4 py-2">
+            <div className="flex items-start justify-center gap-0">
+              <div className="-mr-6">
+                <RobotSummary robot={placed} evalr={null} won={false} side="YOU" align="left" stage={fightStage} revealed nameVisible />
+              </div>
+              <div className="-ml-6">
+                <RobotSummary
+                  robot={opponentRobot}
+                  evalr={null}
+                  won={fightStage === "removed"}
+                  side="AI"
+                  align="right"
+                  stage="idle"
+                  revealed
+                  nameVisible
+                />
+              </div>
+            </div>
+            {fightStage === "removed" && (
+              <button onClick={handleClose} className="btn-primary px-6 py-2">
+                GOT IT
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -3913,7 +4161,17 @@ function useFlipDeparture(active, toRect, fallback) {
   const [transform, setTransform] = useState("translate(0, 0) scale(1)");
   const firedRef = useRef(false);
 
-  useEffect(() => {
+  // useLayoutEffect (not useEffect) here matters: useEffect runs as a
+  // passive effect, potentially a frame or more after this component's
+  // own commit - which meant the CSS transition didn't actually start
+  // moving toward its real target until sometime after `active` first
+  // flipped true, quietly eating into the fixed-duration window the
+  // caller budgets for the flight (see BattleRow/TieBattleRow's own
+  // setTimeout gap between triggering `depart` and calling `onComplete`).
+  // useLayoutEffect fires synchronously right after DOM mutations, before
+  // the browser paints, so the transition starts on the very next paint
+  // with no extra scheduling lag to eat into that budget.
+  useLayoutEffect(() => {
     if (!active || firedRef.current) return;
     firedRef.current = true;
     const el = boxRef.current;
@@ -3992,7 +4250,14 @@ function BattleRow({ r, playerWs, aiWs, armed, isFinalBay, onFinalAnnounced, onC
     const t3b =
       r.winner !== "mutual" ? setTimeout(() => setNameFadeOut((s) => ({ ...s, winner: true })), 1350) : null;
     const t4 = r.winner !== "mutual" ? setTimeout(() => setDepart(true), 1550) : null;
-    const t5 = setTimeout(() => onComplete?.(), r.winner !== "mutual" ? 2150 : 1900);
+    // 800ms of headroom after depart starts before the true tally icon
+    // swaps in, well past the 550ms CSS flight itself - the previous
+    // 600ms gap left only ~50ms of slack, which real-world scheduling
+    // jitter (three live WebGL canvases rendering concurrently) could
+    // easily eat into, cutting the flight short and swapping to the
+    // final icon before it had actually finished animating there - seen
+    // as a jump at the end.
+    const t5 = setTimeout(() => onComplete?.(), r.winner !== "mutual" ? 2350 : 1900);
     return () => {
       clearTimeout(t0);
       clearTimeout(t1);
@@ -4121,7 +4386,10 @@ function TieBattleRow({ r, playerWs, aiWs, onResolveTie, isFinalBay, onFinalAnno
         }, settleTime + viewPause + 400);
         setTimeout(() => setNameFading(true), settleTime + viewPause + 750);
         setTimeout(() => setDepart(true), settleTime + viewPause + 950);
-        setTimeout(() => onComplete?.(), settleTime + viewPause + 1550);
+        // 800ms of headroom after depart starts before the true tally
+        // icon swaps in - see the matching comment in BattleRow for why
+        // the previous 600ms gap wasn't reliably enough.
+        setTimeout(() => onComplete?.(), settleTime + viewPause + 1750);
       }
     }, 260);
     return () => clearInterval(interval);
@@ -4136,20 +4404,7 @@ function TieBattleRow({ r, playerWs, aiWs, onResolveTie, isFinalBay, onFinalAnno
     const departNow = isWinnerSide && depart;
     const departure = side === "player" ? playerDeparture : aiDeparture;
     return (
-      <div
-        ref={departure.ref}
-        className="flex flex-col items-center gap-1"
-        style={
-          departNow
-            ? departure.style
-            : {
-                transform: isGrownNow ? "scale(1.14)" : "scale(1)",
-                opacity: 1,
-                transformOrigin: "center center",
-                transition: "transform 0.4s ease-out",
-              }
-        }
-      >
+      <div className="flex flex-col items-center gap-1">
         <div
           className="text-[13px] font-bold tracking-wide"
           style={{
@@ -4160,7 +4415,26 @@ function TieBattleRow({ r, playerWs, aiWs, onResolveTie, isFinalBay, onFinalAnno
         >
           {getRobotName(robot)}
         </div>
-        <div className="relative flex flex-col items-center">
+        {/* ref/departure transform scoped to just this dice column, not
+            the name label above - the tally slot this flies to is
+            icon-only, so measuring/animating a box that also included
+            the name label was landing the flight slightly off from the
+            tally icon's true rect, producing a small correcting jump
+            right as the real tally icon appeared in its place. */}
+        <div
+          ref={departure.ref}
+          className="relative flex flex-col items-center"
+          style={
+            departNow
+              ? departure.style
+              : {
+                  transform: isGrownNow ? "scale(1.14)" : "scale(1)",
+                  opacity: 1,
+                  transformOrigin: "center center",
+                  transition: "transform 0.4s ease-out",
+                }
+          }
+        >
           {/* All 3 dice for this side share ONE WebGL canvas (see
               DiceColumnScene) instead of each mounting its own renderer -
               see that component's comment for why. */}
@@ -4268,12 +4542,12 @@ function RobotSummary({
   const departFallback = align === "right" ? "translate(150px, 200px) scale(0.3)" : "translate(-150px, 200px) scale(0.3)";
   const departure = useFlipDeparture(won && depart, departTo, departFallback);
   return (
-    <div
-      ref={departure.ref}
-      className="flex flex-col items-center gap-1"
-      style={won && depart ? departure.style : { transform: "scale(1)", opacity: 1 }}
-    >
-      <div className="relative">
+    <div className="flex flex-col items-center gap-1">
+      <div
+        ref={departure.ref}
+        className="relative"
+        style={won && depart ? departure.style : { transform: "scale(1)", opacity: 1 }}
+      >
         <Isometric3DRobot
           robot={robot}
           facing={facing}
@@ -4294,7 +4568,16 @@ function RobotSummary({
       </div>
       {/* Only shown once the robot has actually settled into its final
           fighting position, not while it's still growing in from the
-          army queue above. */}
+          army queue above. Deliberately kept OUTSIDE the departure ref
+          above (rather than wrapping both together, as before) - the
+          tally slot this robot flies to is icon-only with no name label,
+          so measuring/animating a box that also included this label was
+          landing the flight slightly off from the tally icon's true
+          rect, producing a small correcting jump right as the real tally
+          icon appeared in its place. Leaving the label out of the flown
+          box (it simply fades via nameFading, already in progress by the
+          time depart fires) keeps the measured box an apples-to-apples
+          match with the target the whole way. */}
       <div
         className="text-[13px] font-bold tracking-wide text-center"
         style={{

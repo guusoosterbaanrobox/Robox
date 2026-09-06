@@ -544,6 +544,36 @@ const TOTAL_BAG_PARTS = Object.values(COLOR_COUNT).reduce((a, b) => a + b, 0) * 
 const NUM_BAYS = 7;
 const TOTAL_SLOTS = NUM_BAYS * 3;
 
+// ---------- Multiplayer (play-a-friend) helpers ----------
+// No server: both browsers run this exact same game engine independently.
+// The bag is synced once at match start, then both sides just relay their
+// own moves through the artifact's shared storage (window.storage) - never
+// the whole game state - since the resulting workshops/bag/table stay in
+// lockstep automatically as long as both sides replay the same sequence of
+// moves in order. Each side writes only to its OWN mailbox key, so there's
+// never a write race between the two players.
+const MP_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I - easy to read aloud
+function mkMatchCode() {
+  let s = "";
+  for (let i = 0; i < 5; i++) s += MP_CODE_CHARS[Math.floor(Math.random() * MP_CODE_CHARS.length)];
+  return s;
+}
+async function mpSet(key, value) {
+  try {
+    await window.storage.set(key, value, true);
+  } catch (e) {
+    /* best-effort; a dropped write just gets caught by the next poll/retry */
+  }
+}
+async function mpGet(key) {
+  try {
+    const r = await window.storage.get(key, true);
+    return r ? r.value : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Draws up to `n` parts from a bag without replacement, weighted toward rarer
 // colors (lower COLOR_COUNT = higher chance) so the offer skews "reasonably
 // rare" without being guaranteed all-rare every time. Returns the picks and
@@ -1911,6 +1941,23 @@ export default function RobotWars() {
   const [showMenu, setShowMenu] = useState(false);
   const [showTutorial, setShowTutorial] = useState(false);
   const actingRef = useRef(false);
+
+  // ---- Multiplayer (play-a-friend) state ----
+  // mode: "ai" (default, existing single-player experience, untouched) |
+  // "host" (this browser created the match code) | "guest" (this browser
+  // joined with a code). In both host/guest, "player" always means "me"
+  // and "ai" always means "my friend", exactly like the existing
+  // playerWs/aiWs/turn state already works - so a friend's moves are just
+  // fed into the same slots the built-in AI used to fill.
+  const [mode, setMode] = useState("ai");
+  const [matchCode, setMatchCode] = useState(null);
+  const [showMpLobby, setShowMpLobby] = useState(false);
+  const [mpSubmode, setMpSubmode] = useState(null); // null | "choose" | "host-waiting" | "join"
+  const [joinCodeInput, setJoinCodeInput] = useState("");
+  const [mpError, setMpError] = useState(null);
+  const [drawnTableIdx, setDrawnTableIdx] = useState(null); // which table index the current drawnPart came from (phase 2), so a friend's move can be replayed
+  const mySeqRef = useRef(0);
+  const peerSeqRef = useRef(0);
   // Refs used purely to measure screen positions for the "drawn part flies
   // into its bay slot" animation: drawnPartRef points at whichever of the
   // two (phase 1 / phase 2) big rotating-3D-part displays is currently
@@ -1921,6 +1968,99 @@ export default function RobotWars() {
   const [flyingPart, setFlyingPart] = useState(null);
 
   const pushLog = useCallback((msg) => setLog((l) => [...l.slice(-40), msg]), []);
+
+  // ---- Multiplayer: start a fresh match, either as host or guest ----
+  function resetForNewMatch() {
+    setTable([]);
+    setPlayerWs(emptyWorkshop());
+    setAiWs(emptyWorkshop());
+    setPhase(1);
+    setDrawnPart(null);
+    setDrawSource(null);
+    setDrawnTableIdx(null);
+    setAwaitingSourceChoice(false);
+    setWarDeclaredBy(null);
+    setGoldenWin(null);
+    setWarSurge(null);
+    setWarSurgePending(false);
+    setFinalChanceUsed(false);
+    setBattle(null);
+    setRevealCount(0);
+    mySeqRef.current = 0;
+    peerSeqRef.current = 0;
+  }
+
+  async function startHostMatch() {
+    const code = mkMatchCode();
+    const freshBag = buildBag();
+    setMatchCode(code);
+    setMode("host");
+    setMpSubmode("host-waiting");
+    setMpError(null);
+    resetForNewMatch();
+    setBag(freshBag);
+    setTurn("player"); // host always goes first
+    setLog([`Match code ${code} created. Share it with a friend - waiting for them to join…`]);
+    await mpSet(`rw:${code}:init`, JSON.stringify({ bag: freshBag }));
+    await mpSet(`rw:${code}:joined`, "no");
+  }
+
+  async function joinMatch() {
+    const code = joinCodeInput.trim().toUpperCase();
+    if (!code) return;
+    setMpError(null);
+    const raw = await mpGet(`rw:${code}:init`);
+    if (!raw) {
+      setMpError("No match found with that code. Double-check it, or ask your friend for a fresh one.");
+      return;
+    }
+    let init;
+    try {
+      init = JSON.parse(raw);
+    } catch {
+      setMpError("That match code looks invalid.");
+      return;
+    }
+    setMatchCode(code);
+    setMode("guest");
+    setMpSubmode(null);
+    setShowMpLobby(false);
+    resetForNewMatch();
+    setBag(init.bag);
+    setTurn("ai"); // host goes first, so from my (guest) perspective that's my friend's turn
+    setLog([`Joined match ${code}. Your friend goes first.`]);
+    await mpSet(`rw:${code}:joined`, "yes");
+  }
+
+  function backToAiMode() {
+    setMode("ai");
+    setMatchCode(null);
+    setMpSubmode(null);
+    setShowMpLobby(false);
+    setMpError(null);
+    setBag(buildBag());
+    resetForNewMatch();
+    setTurn("player");
+    setLog(["Blind bag shuffled. 54 parts loaded. Player draws first."]);
+  }
+
+  // ---- Multiplayer: host waits for a friend to join ----
+  useEffect(() => {
+    if (mode !== "host" || mpSubmode !== "host-waiting" || !matchCode) return;
+    let stopped = false;
+    const iv = setInterval(async () => {
+      const v = await mpGet(`rw:${matchCode}:joined`);
+      if (!stopped && v === "yes") {
+        setMpSubmode(null);
+        setShowMpLobby(false);
+        pushLog("Your friend joined! Fight begins.");
+      }
+    }, 1200);
+    return () => {
+      stopped = true;
+      clearInterval(iv);
+    };
+  }, [mode, mpSubmode, matchCode, pushLog]);
 
   const playerFilled = playerWs.flatMap((r) => TYPES.map((t) => r[t])).filter(Boolean).length;
   const aiFilled = aiWs.flatMap((r) => TYPES.map((t) => r[t])).filter(Boolean).length;
@@ -1955,6 +2095,7 @@ export default function RobotWars() {
       SFX.place();
       if (TYPES.every((t) => next[bayIndex][t] !== null)) playColorChime(next[bayIndex]);
       pushLog(`Placed ${colorInfo(drawnPart.color).label} ${TYPE_LABEL[drawnPart.type]} into Bay ${bayIndex + 1} (${TYPE_LABEL[slotType]}).`);
+      broadcastMove({ type: "p1", bayIndex, slotType });
       const goldenBay = findGoldenBay(next);
       if (goldenBay) {
         setGoldenWin({ winner: "player", robot: goldenBay });
@@ -1973,22 +2114,41 @@ export default function RobotWars() {
           old ? `, discarding ${colorInfo(old.color).label} ${TYPE_LABEL[old.type]} to the table.` : "."
         }`
       );
+      // Figure out which of the 3 outcomes this swap leads to *before*
+      // clearing drawnPart/etc, so the broadcast can tell my friend's
+      // screen which branch to replay (see applyRemoteAction's "p2" case).
+      const mpSource = drawSource;
+      const mpTableIdx = drawnTableIdx;
+      const mpWillDeclare = warSurgePending;
+      const mpWillFinalUse = !mpWillDeclare && warDeclaredBy === "ai" && !finalChanceUsed;
       setDrawnPart(null);
       setDrawSource(null);
+      setDrawnTableIdx(null);
       const goldenBay = findGoldenBay(next);
       if (goldenBay) {
         setWarSurgePending(false);
+        broadcastMove({
+          type: "p2",
+          source: mpSource,
+          tableIdx: mpTableIdx,
+          bayIndex,
+          slotType,
+          event: "normal",
+        });
         setGoldenWin({ winner: "player", robot: goldenBay });
         return;
       }
-      if (warSurgePending) {
+      if (mpWillDeclare) {
         setWarSurgePending(false);
+        broadcastMove({ type: "p2", source: mpSource, tableIdx: mpTableIdx, bayIndex, slotType, event: "declareWar" });
         finalizeWarDeclare("player");
-      } else if (warDeclaredBy === "ai" && !finalChanceUsed) {
+      } else if (mpWillFinalUse) {
         setFinalChanceUsed(true);
         setPhase(3);
+        broadcastMove({ type: "p2", source: mpSource, tableIdx: mpTableIdx, bayIndex, slotType, event: "finalUsed" });
         pushLog("── Final chance used. Both armies lock. Phase 3: War. ──");
       } else {
+        broadcastMove({ type: "p2", source: mpSource, tableIdx: mpTableIdx, bayIndex, slotType, event: "normal" });
         setTurn("ai");
       }
     }
@@ -2024,6 +2184,7 @@ export default function RobotWars() {
       setBag(rest);
       setDrawnPart(part);
       setDrawSource("bag");
+      setDrawnTableIdx(null);
       pushLog(`You drew a ${colorInfo(part.color).label} ${TYPE_LABEL[part.type]} from the bag. Choose a slot to swap (or same slot to keep).`);
     }
     setAwaitingSourceChoice(false);
@@ -2033,6 +2194,7 @@ export default function RobotWars() {
     setTable((t) => t.filter((_, i) => i !== idx));
     setDrawnPart(part);
     setDrawSource("table");
+    setDrawnTableIdx(idx); // remembered so a multiplayer broadcast can tell my friend's screen exactly which table part this was
     setAwaitingSourceChoice(false);
     pushLog(`You took a ${colorInfo(part.color).label} ${TYPE_LABEL[part.type]} from the table. Choose a slot to swap.`);
   }
@@ -2040,11 +2202,12 @@ export default function RobotWars() {
   function finalizeWarDeclare(who) {
     setWarDeclaredBy(who);
     SFX.warDeclared();
+    const opponentLabel = mode === "ai" ? "The AI" : "Your friend";
     if (who === "player") {
-      pushLog("── You declare WAR! The AI gets one final chance to improve its army. ──");
+      pushLog(`── You declare WAR! ${opponentLabel} gets one final chance to improve its army. ──`);
       setTurn("ai-final");
     } else {
-      pushLog("── The AI declares WAR! You get one final chance to improve your army. ──");
+      pushLog(`── ${opponentLabel} declares WAR! You get one final chance to improve your army. ──`);
       setTurn("player-final");
     }
   }
@@ -2090,11 +2253,13 @@ export default function RobotWars() {
 
   function playerDeclareWar() {
     if (bag.length === 0) {
+      broadcastMove({ type: "declareWarNoSurge" });
       finalizeWarDeclare("player");
       return;
     }
     const { picks, rest } = pickSurgeParts(bag, 5);
     setBag(rest);
+    broadcastBagResync(rest);
     setWarSurge({ parts: picks });
     pushLog("── War Surge! Choose one part to reinforce your army before declaring. ──");
   }
@@ -2114,8 +2279,10 @@ export default function RobotWars() {
     finalizeWarDeclare("player");
   }
 
-  // ---- AI turn engine ----
+  // ---- AI turn engine (single-player only; a friend's turn is handled by
+  // the multiplayer mailbox effect further down instead) ----
   useEffect(() => {
+    if (mode !== "ai") return;
     if (actingRef.current) return;
     const isAiActive = turn === "ai" || turn === "ai-final";
     if (!isAiActive) return;
@@ -2132,7 +2299,130 @@ export default function RobotWars() {
       actingRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turn, phase, goldenWin]);
+  }, [turn, phase, goldenWin, mode]);
+
+  // ---- Multiplayer: apply a move my friend made, mirrored onto the "ai"
+  // side (same slots the built-in AI used to fill) ----
+  function applyRemoteAction(msg) {
+    if (msg.type === "p1") {
+      const { bayIndex, slotType } = msg;
+      if (bag.length === 0 || aiWs[bayIndex][slotType] !== null) return;
+      const part = bag[0];
+      const rest = bag.slice(1);
+      const next = aiWs.map((r, i) => (i === bayIndex ? { ...r, [slotType]: part } : r));
+      setAiWs(next);
+      setBag(rest);
+      SFX.place();
+      if (TYPES.every((t) => next[bayIndex][t] !== null)) playColorChime(next[bayIndex]);
+      pushLog(`Your friend placed a part into Bay ${bayIndex + 1} (${TYPE_LABEL[slotType]}).`);
+      const goldenBay = findGoldenBay(next);
+      if (goldenBay) {
+        setGoldenWin({ winner: "ai", robot: goldenBay });
+        return;
+      }
+      setTurn("player");
+      return;
+    }
+    if (msg.type === "bagResync") {
+      setBag(Array.isArray(msg.bag) ? msg.bag : []);
+      return;
+    }
+    if (msg.type === "declareWarNoSurge" || msg.type === "skipWar") {
+      finalizeWarDeclare("ai");
+      return;
+    }
+    if (msg.type === "finalSkip") {
+      setPhase(3);
+      pushLog("── Your friend went straight to war. Phase 3: War. ──");
+      return;
+    }
+    if (msg.type === "p2") {
+      const { source, tableIdx, bayIndex, slotType, event } = msg;
+      let part = null;
+      if (source === "bag") {
+        part = bag[0];
+        if (!part) return;
+        setBag((b) => b.slice(1));
+      } else {
+        part = table[tableIdx];
+        if (!part) return;
+        setTable((t) => t.filter((_, i) => i !== tableIdx));
+      }
+      const old = aiWs[bayIndex][slotType];
+      const next = aiWs.map((r, i) => (i === bayIndex ? { ...r, [slotType]: part } : r));
+      setAiWs(next);
+      if (old) setTable((t) => [...t, old]);
+      SFX.swap();
+      playColorChime(next[bayIndex]);
+      pushLog(`Your friend swapped a part into Bay ${bayIndex + 1} (${TYPE_LABEL[slotType]}).`);
+      const goldenBay = findGoldenBay(next);
+      if (goldenBay) {
+        setGoldenWin({ winner: "ai", robot: goldenBay });
+        return;
+      }
+      if (event === "declareWar") {
+        finalizeWarDeclare("ai");
+      } else if (event === "finalUsed") {
+        setPhase(3);
+        pushLog("── Final chance used. Both armies lock. Phase 3: War. ──");
+      } else {
+        setTurn("player");
+      }
+      return;
+    }
+  }
+
+  // ---- Multiplayer: poll for my friend's latest move(s) while it's their
+  // turn. Each message gets its OWN storage key (rather than one slot that
+  // gets overwritten) and a strictly increasing sequence number, because a
+  // single turn can produce more than one message (e.g. declaring war also
+  // resyncs the bag first - see broadcastBagResync) and none of them should
+  // ever get silently clobbered by the next write. ----
+  useEffect(() => {
+    if (mode === "ai" || !matchCode) return;
+    if (phase === 3) return; // phase 3 has its own (deterministic + tie-roll) sync below
+    const peerRole = mode === "host" ? "guest" : "host";
+    let stopped = false;
+    const iv = setInterval(async () => {
+      if (stopped) return;
+      const isFriendsTurn = turn === "ai" || turn === "ai-final";
+      if (!isFriendsTurn) return;
+      // Drain every pending message in order, not just the newest one.
+      for (let guard = 0; guard < 10; guard++) {
+        if (stopped) return;
+        const nextSeq = peerSeqRef.current + 1;
+        const raw = await mpGet(`rw:${matchCode}:action:${peerRole}:${nextSeq}`);
+        if (!raw) break;
+        let msg;
+        try {
+          msg = JSON.parse(raw);
+        } catch {
+          break;
+        }
+        peerSeqRef.current = nextSeq;
+        applyRemoteAction(msg);
+      }
+    }, 700);
+    return () => {
+      stopped = true;
+      clearInterval(iv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, matchCode, turn, phase]);
+
+  // ---- Multiplayer: send my own move to my friend's screen ----
+  function broadcastMove(payload) {
+    if (mode === "ai" || !matchCode) return;
+    mySeqRef.current += 1;
+    mpSet(`rw:${matchCode}:action:${mode}:${mySeqRef.current}`, JSON.stringify({ seq: mySeqRef.current, ...payload }));
+  }
+  // War Surge draws 5 parts via a weighted-random scatter through the bag
+  // (not just the front few), which the normal "both bags stay aligned
+  // automatically" trick can't cover - so whichever side declares war
+  // sends the resulting bag over explicitly, once, as a hard resync.
+  function broadcastBagResync(restBag) {
+    broadcastMove({ type: "bagResync", bag: restBag });
+  }
 
   function runAiTurn(isFinal) {
     if (phase === 1) {
@@ -2258,6 +2548,7 @@ export default function RobotWars() {
   // finalChance banner and must click Fight (see the bottom Fight! button,
   // which calls this directly when phase2Overlay === "finalChance").
   function playerFinalSkip() {
+    broadcastMove({ type: "finalSkip" });
     setPhase(3);
     pushLog("── You go straight to war. Phase 3: War. ──");
   }
@@ -2675,7 +2966,7 @@ export default function RobotWars() {
       `}</style>
 
       {goldenWin ? (
-        <GoldenWinOverlay winner={goldenWin.winner} robot={goldenWin.robot} onReset={resetGame} />
+        <GoldenWinOverlay winner={goldenWin.winner} robot={goldenWin.robot} onReset={mode === "ai" ? resetGame : backToAiMode} />
       ) : (
       <>
         {/* These three rely on `position: fixed` to cover or anchor to the
@@ -2684,12 +2975,43 @@ export default function RobotWars() {
         {flyingPart && <FlyingPart key={flyingPart.id} {...flyingPart} onDone={() => setFlyingPart(null)} />}
         {showRules && <RulesOverlay onClose={() => setShowRules(false)} />}
         {showTutorial && <TutorialOverlay onClose={() => setShowTutorial(false)} />}
+        {showMpLobby && (
+          <MpLobbyOverlay
+            mode={mode}
+            mpSubmode={mpSubmode}
+            matchCode={matchCode}
+            joinCodeInput={joinCodeInput}
+            setJoinCodeInput={setJoinCodeInput}
+            mpError={mpError}
+            onChooseHost={startHostMatch}
+            onChooseJoin={() => {
+              setMpSubmode("join");
+              setMpError(null);
+            }}
+            onJoinSubmit={joinMatch}
+            onCancel={() => {
+              setShowMpLobby(false);
+              setMpSubmode(null);
+              setMpError(null);
+              if (mode !== "ai" && (mpSubmode === "host-waiting" || mpSubmode === "join" || mpSubmode === "choose")) {
+                // Never actually connected - fall back to single player.
+                if (mode === "host" || mode === "guest") backToAiMode();
+              }
+            }}
+          />
+        )}
         {showMenu && (
           <MenuPanel
             onClose={() => setShowMenu(false)}
             onRestart={() => {
               setShowMenu(false);
-              resetGame();
+              mode === "ai" ? resetGame() : backToAiMode();
+            }}
+            onPlayFriend={() => {
+              setShowMenu(false);
+              setMpSubmode("choose");
+              setMpError(null);
+              setShowMpLobby(true);
             }}
             onRules={() => {
               setShowMenu(false);
@@ -2710,7 +3032,7 @@ export default function RobotWars() {
         {/* Header - restart moved into the menu panel, logo moved into
             the menu panel too, so all that's left up here is the
             hamburger trigger itself. */}
-        <div className="flex justify-center items-center">
+        <div className="flex justify-center items-center relative">
           <button
             onClick={() => setShowMenu(true)}
             className="btn-tertiary w-9 h-9 flex items-center justify-center"
@@ -2735,6 +3057,15 @@ export default function RobotWars() {
               <line x1="3" y1="18" x2="21" y2="18" />
             </svg>
           </button>
+          {mode !== "ai" && matchCode && (
+            <div
+              className="absolute right-0 top-1/2 -translate-y-1/2 text-[10px] tracking-[0.15em] px-2 py-1 rounded"
+              style={{ background: "#0c0d10", color: "#7fd0ff", border: "1px solid #2a2c33" }}
+              title={`Playing a friend - match ${matchCode}`}
+            >
+              VS FRIEND · {matchCode}
+            </div>
+          )}
         </div>
 
         {phase !== 3 && (
@@ -2784,7 +3115,7 @@ export default function RobotWars() {
                     </div>
                   ) : (
                     <div className="text-xs text-zinc-500 italic">
-                      {turn === "ai" || turn === "ai-final" ? "Waiting for the AI…" : "…"}
+                      {turn === "ai" || turn === "ai-final" ? (mode === "ai" ? "Waiting for the AI…" : "Waiting for your friend…") : "…"}
                     </div>
                   )}
                 </div>
@@ -2900,7 +3231,7 @@ export default function RobotWars() {
                         className="text-xl font-bold text-center bg-zinc-900 px-5 py-3 rounded mb-2"
                         style={{ color: "#fff" }}
                       >
-                        The AI declared war
+                        {mode === "ai" ? "The AI declared war" : "Your friend declared war"}
                       </span>
                     </div>
                   )}
@@ -2914,7 +3245,7 @@ export default function RobotWars() {
                   {phase2Overlay === "aiTurn" && (
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                       <span className="text-sm font-bold tracking-wide" style={{ color: "#333" }}>
-                        AI's turn…
+                        {mode === "ai" ? "AI's turn…" : "Your friend's turn…"}
                       </span>
                     </div>
                   )}
@@ -3014,8 +3345,10 @@ export default function RobotWars() {
             aiWs={aiWs}
             revealCount={revealCount}
             setRevealCount={setRevealCount}
-            onReset={resetGame}
+            onReset={mode === "ai" ? resetGame : backToAiMode}
             onResolveTie={resolveTie}
+            mpMode={mode}
+            mpMatchCode={matchCode}
           />
         )}
       </div>
@@ -3140,7 +3473,7 @@ function quitApp() {
 // Mirrors RulesOverlay's own enter/exit timing (200ms) so the two overlays
 // feel consistent, just sliding from the right edge instead of fading the
 // alert-text banner.
-function MenuPanel({ onClose, onRestart, onRules, onTutorial, onQuit }) {
+function MenuPanel({ onClose, onRestart, onPlayFriend, onRules, onTutorial, onQuit }) {
   const [closing, setClosing] = useState(false);
 
   function handleClose() {
@@ -3174,6 +3507,12 @@ function MenuPanel({ onClose, onRestart, onRules, onTutorial, onQuit }) {
           RESTART GAME
         </button>
         <button
+          onClick={() => pick(onPlayFriend)}
+          className="text-left px-4 py-4 text-white border-b border-zinc-800 hover:bg-white/5 active:bg-white/10 transition-colors"
+        >
+          PLAY A FRIEND
+        </button>
+        <button
           onClick={() => pick(onRules)}
           className="text-left px-4 py-4 text-white border-b border-zinc-800 hover:bg-white/5 active:bg-white/10 transition-colors"
         >
@@ -3191,6 +3530,76 @@ function MenuPanel({ onClose, onRestart, onRules, onTutorial, onQuit }) {
         >
           QUIT
         </button>
+      </div>
+    </div>
+  );
+}
+
+// No server involved: this overlay just walks whoever's hosting through
+// sharing a short code, and whoever's joining through typing it in. Both
+// browsers then run the game independently and relay moves to each other
+// through this artifact's shared storage (see the mpSet/mpGet helpers and
+// the "Multiplayer" comments up in RobotWars).
+function MpLobbyOverlay({ mode, mpSubmode, matchCode, joinCodeInput, setJoinCodeInput, mpError, onChooseHost, onChooseJoin, onJoinSubmit, onCancel }) {
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/85 flex items-center justify-center px-4">
+      <div className="bg-[#17181c] border border-zinc-700 rounded-lg max-w-sm w-full p-6 flex flex-col gap-4 text-white">
+        {mpSubmode === "choose" && (
+          <>
+            <div className="text-lg font-bold tracking-wide text-center">PLAY A FRIEND</div>
+            <div className="text-xs text-zinc-400 text-center">
+              No account needed - just share a code. This starts a brand new match.
+            </div>
+            <button onClick={onChooseHost} className="btn-primary py-3">
+              HOST A MATCH
+            </button>
+            <button onClick={onChooseJoin} className="btn-tertiary py-3">
+              JOIN WITH A CODE
+            </button>
+            <button onClick={onCancel} className="text-xs text-zinc-500 hover:text-zinc-300 mt-1">
+              Cancel
+            </button>
+          </>
+        )}
+
+        {mpSubmode === "host-waiting" && (
+          <>
+            <div className="text-lg font-bold tracking-wide text-center">SHARE THIS CODE</div>
+            <div
+              className="text-4xl font-bold tracking-[0.3em] text-center py-4 rounded"
+              style={{ background: "#0c0d10", color: "#7fd0ff" }}
+            >
+              {matchCode}
+            </div>
+            <div className="text-xs text-zinc-400 text-center flex items-center justify-center gap-2">
+              <span className="inline-block w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
+              Waiting for your friend to join…
+            </div>
+            <button onClick={onCancel} className="btn-tertiary py-3 mt-1">
+              CANCEL
+            </button>
+          </>
+        )}
+
+        {mpSubmode === "join" && (
+          <>
+            <div className="text-lg font-bold tracking-wide text-center">ENTER MATCH CODE</div>
+            <input
+              value={joinCodeInput}
+              onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase().slice(0, 5))}
+              placeholder="ABCDE"
+              autoFocus
+              className="text-2xl font-bold tracking-[0.3em] text-center py-3 rounded bg-[#0c0d10] text-white border border-zinc-700 outline-none focus:border-zinc-400"
+            />
+            {mpError && <div className="text-xs text-red-400 text-center">{mpError}</div>}
+            <button onClick={onJoinSubmit} disabled={joinCodeInput.trim().length === 0} className="btn-primary py-3 disabled:opacity-40">
+              JOIN
+            </button>
+            <button onClick={onCancel} className="text-xs text-zinc-500 hover:text-zinc-300 mt-1">
+              Cancel
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -3477,7 +3886,7 @@ function TutorialOverlay({ onClose }) {
   );
 }
 
-function BattleView({ battle, playerWs, aiWs, revealCount, setRevealCount, onReset, onResolveTie }) {
+function BattleView({ battle, playerWs, aiWs, revealCount, setRevealCount, onReset, onResolveTie, mpMode, mpMatchCode }) {
   const { results, pWins, aWins } = battle;
   // revealCount is allowed to run one past NUM_BAYS: the extra step is what
   // separates "the last bay is on display" from "the game is over" - it
@@ -3624,7 +4033,7 @@ function BattleView({ battle, playerWs, aiWs, revealCount, setRevealCount, onRes
         {gameOver ? (
           <div className="w-full h-full flex items-center justify-center">
             <div className="alert-text text-center" style={{ fontSize: "clamp(32px, 11vw, 64px)" }}>
-              {pWins > aWins ? "YOU WIN!" : pWins < aWins ? "AI WINS!" : "DRAW"}
+              {pWins > aWins ? "YOU WIN!" : pWins < aWins ? (mpMode && mpMode !== "ai" ? "FRIEND WINS!" : "AI WINS!") : "DRAW"}
             </div>
           </div>
         ) : currentBay ? (
@@ -3641,6 +4050,8 @@ function BattleView({ battle, playerWs, aiWs, revealCount, setRevealCount, onRes
               enterFrom={enterFromRef.current}
               playerTallyRef={playerTallyRef}
               aiTallyRef={aiTallyRef}
+              mpMode={mpMode}
+              mpMatchCode={mpMatchCode}
             />
           ) : (
             <BattleRow
@@ -3655,6 +4066,7 @@ function BattleView({ battle, playerWs, aiWs, revealCount, setRevealCount, onRes
               enterFrom={enterFromRef.current}
               playerTallyRef={playerTallyRef}
               aiTallyRef={aiTallyRef}
+              mpMode={mpMode}
             />
           )
         ) : null}
@@ -4262,7 +4674,7 @@ function useFlipDeparture(active, toRect, fallback) {
   };
 }
 
-function BattleRow({ r, playerWs, aiWs, armed, isFinalBay, onFinalAnnounced, onComplete, enterFrom, playerTallyRef, aiTallyRef }) {
+function BattleRow({ r, playerWs, aiWs, armed, isFinalBay, onFinalAnnounced, onComplete, enterFrom, playerTallyRef, aiTallyRef, mpMode }) {
   const [stage, setStage] = useState("idle"); // idle -> exploding -> removed (loser only)
   const [depart, setDepart] = useState(false); // winner's fly-to-score-tally transform
   // Fires a short beat before each robot's own exit - the loser's name
@@ -4357,7 +4769,7 @@ function BattleRow({ r, playerWs, aiWs, armed, isFinalBay, onFinalAnnounced, onC
             robot={aiWs[r.aiIdx]}
             evalr={r.ar}
             won={r.winner === "ai"}
-            side="AI"
+            side={mpMode && mpMode !== "ai" ? "FRIEND" : "AI"}
             align="right"
             stage={r.winner === "ai" ? "idle" : stage}
             depart={depart}
@@ -4378,7 +4790,7 @@ function BattleRow({ r, playerWs, aiWs, armed, isFinalBay, onFinalAnnounced, onC
   );
 }
 
-function TieBattleRow({ r, playerWs, aiWs, onResolveTie, isFinalBay, onFinalAnnounced, onComplete, enterFrom, playerTallyRef, aiTallyRef }) {
+function TieBattleRow({ r, playerWs, aiWs, onResolveTie, isFinalBay, onFinalAnnounced, onComplete, enterFrom, playerTallyRef, aiTallyRef, mpMode, mpMatchCode }) {
   const rootRef = useRef(null);
   const [rolled, setRolled] = useState(false);
   const [drawExiting, setDrawExiting] = useState(false);
@@ -4410,11 +4822,48 @@ function TieBattleRow({ r, playerWs, aiWs, onResolveTie, isFinalBay, onFinalAnno
     return () => clearTimeout(t);
   }, []);
 
-  function handleRoll() {
+  // Multiplayer: a dice roll is random, so both screens must agree on the
+  // same outcome. Both bays report the SAME tie under a key built purely
+  // from the sorted pair of bay indices involved (this stays identical
+  // regardless of which side's screen computes it - my bay vs my friend's
+  // bay resolve to the same sorted pair either way), so whichever player
+  // clicks "Roll" first publishes their result there, and the other
+  // screen picks it up and mirrors that exact result instead of rolling
+  // its own.
+  const tieKey = mpMatchCode ? `rw:${mpMatchCode}:tie:${Math.min(r.i, r.aiIdx)}_${Math.max(r.i, r.aiIdx)}` : null;
+
+  useEffect(() => {
+    if (!tieKey || rolled || dice) return;
+    let stopped = false;
+    const iv = setInterval(async () => {
+      if (stopped) return;
+      const raw = await mpGet(tieKey);
+      if (!raw || stopped) return;
+      let remoteDice;
+      try {
+        remoteDice = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      stopped = true;
+      clearInterval(iv);
+      handleRoll(remoteDice);
+    }, 700);
+    return () => {
+      stopped = true;
+      clearInterval(iv);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tieKey, rolled, dice]);
+
+  function handleRoll(providedDice) {
     primeSpeech();
-    const d = cubeDuel();
-    d.pSpins = [0, 1, 2].map(() => 2 + Math.floor(Math.random() * 2));
-    d.aSpins = [0, 1, 2].map(() => 2 + Math.floor(Math.random() * 2));
+    const d = providedDice || cubeDuel();
+    if (!providedDice) {
+      d.pSpins = [0, 1, 2].map(() => 2 + Math.floor(Math.random() * 2));
+      d.aSpins = [0, 1, 2].map(() => 2 + Math.floor(Math.random() * 2));
+      if (tieKey) mpSet(tieKey, JSON.stringify(d));
+    }
     setDice(d);
     setDrawExiting(true);
     setTimeout(() => setRolled(true), 200);
@@ -4546,7 +4995,7 @@ function TieBattleRow({ r, playerWs, aiWs, onResolveTie, isFinalBay, onFinalAnno
                   robot={aiWs[r.aiIdx]}
                   evalr={r.ar}
                   won={false}
-                  side="AI"
+                  side={mpMode && mpMode !== "ai" ? "FRIEND" : "AI"}
                   align="right"
                   stage="idle"
                   nameVisible={aiEnter.arrived}

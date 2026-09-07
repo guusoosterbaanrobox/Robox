@@ -2773,6 +2773,10 @@ export default function RobotWars() {
               setShowMenu(false);
               resetGame();
             }}
+            onSinglePlayer={() => {
+              setShowMenu(false);
+              backToAiMode();
+            }}
             onPlayFriend={() => {
               setShowMenu(false);
               startLocalMatch();
@@ -3245,7 +3249,7 @@ function quitApp() {
 // Mirrors RulesOverlay's own enter/exit timing (200ms) so the two overlays
 // feel consistent, just sliding from the right edge instead of fading the
 // alert-text banner.
-function MenuPanel({ onClose, onRestart, onPlayFriend, onRules, onTutorial, onQuit }) {
+function MenuPanel({ onClose, onRestart, onSinglePlayer, onPlayFriend, onRules, onTutorial, onQuit }) {
   const [closing, setClosing] = useState(false);
 
   function handleClose() {
@@ -3279,10 +3283,16 @@ function MenuPanel({ onClose, onRestart, onPlayFriend, onRules, onTutorial, onQu
           RESTART GAME
         </button>
         <button
+          onClick={() => pick(onSinglePlayer)}
+          className="text-left px-4 py-4 text-white border-b border-zinc-800 hover:bg-white/5 active:bg-white/10 transition-colors"
+        >
+          SINGLE PLAYER
+        </button>
+        <button
           onClick={() => pick(onPlayFriend)}
           className="text-left px-4 py-4 text-white border-b border-zinc-800 hover:bg-white/5 active:bg-white/10 transition-colors"
         >
-          <div>PLAY A FRIEND</div>
+          <div>MULTIPLAYER</div>
           <div className="text-[10px] text-zinc-500 tracking-wide mt-0.5">Pass-and-play - take turns on this device</div>
         </button>
         <button

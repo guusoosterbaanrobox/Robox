@@ -1998,18 +1998,23 @@ export default function RobotWars() {
     }
   }, [playerFilled, aiFilled, phase, pushLog]);
 
-  // ---- Phase 1 auto-draw for whichever human's turn it is ----
+  // ---- Phase 1 auto-draw ----
+  // Single-player only: the AI-vs-human game keeps its original instant
+  // draw. In local pass-and-play, a turn instead starts with a visible bag
+  // to click (see the phase-1 JSX below), so both players clearly see the
+  // hand-off moment and the part that gets revealed.
   useEffect(() => {
-    if (!(isPlayerTurn || isOpponentHumanTurn)) return;
+    if (mode === "local") return;
+    if (!isPlayerTurn) return;
     if (phase === 1 && !drawnPart && activeFilled < TOTAL_SLOTS && !warDeclaredBy && !goldenWin) {
       if (bag.length === 0) return;
       const [part, ...rest] = bag;
       setBag(rest);
       setDrawnPart(part);
-      pushLog(`${isPlayerTurn ? "You" : "Player 2"} drew a ${colorInfo(part.color).label} ${TYPE_LABEL[part.type]}. Choose a bay slot.`);
+      pushLog(`You drew a ${colorInfo(part.color).label} ${TYPE_LABEL[part.type]}. Choose a bay slot.`);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, turn, drawnPart, activeFilled, bag, warDeclaredBy, goldenWin, pushLog, mode]);
+  }, [phase, turn, drawnPart, activeFilled, bag, warDeclaredBy, goldenWin, mode]);
 
   // ---- Active player's slot click (works for either side's human turn) ----
   function handlePlayerSlotClick(bayIndex, slotType) {
@@ -2099,7 +2104,11 @@ export default function RobotWars() {
       setBag(rest);
       setDrawnPart(part);
       setDrawSource("bag");
-      pushLog(`${activeName} drew a ${colorInfo(part.color).label} ${TYPE_LABEL[part.type]} from the bag. Choose a slot to swap (or same slot to keep).`);
+      pushLog(
+        phase === 1
+          ? `${activeName} drew a ${colorInfo(part.color).label} ${TYPE_LABEL[part.type]}. Choose a bay slot.`
+          : `${activeName} drew a ${colorInfo(part.color).label} ${TYPE_LABEL[part.type]} from the bag. Choose a slot to swap (or same slot to keep).`
+      );
     }
     setAwaitingSourceChoice(false);
   }
@@ -2882,14 +2891,25 @@ export default function RobotWars() {
                       </div>
                     </div>
                   ) : (
-                    <div className="text-xs text-zinc-500 italic">
-                      {turn === "ai" || turn === "ai-final"
-                        ? mode === "ai"
-                          ? "Waiting for the AI…"
-                          : mode === "local"
-                          ? "Player 2's turn…"
-                          : "Waiting for your friend…"
-                        : "…"}
+                    <div className="flex items-center justify-center h-full">
+                      {mode === "local" && (isPlayerTurn || isOpponentHumanTurn) && bag.length > 0 ? (
+                        <button onClick={() => playerDrawFrom("bag")} className="pick-bag shrink-0 self-center">
+                          <div>PICK</div>
+                          <div>PART</div>
+                          <div>FROM</div>
+                          <div>BAG</div>
+                        </button>
+                      ) : (
+                        <div className="text-xs text-zinc-500 italic">
+                          {turn === "ai" || turn === "ai-final"
+                            ? mode === "ai"
+                              ? "Waiting for the AI…"
+                              : mode === "local"
+                              ? "Player 2's turn…"
+                              : "Waiting for your friend…"
+                            : "…"}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

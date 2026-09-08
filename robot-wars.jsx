@@ -1932,6 +1932,21 @@ export default function RobotWars() {
 
   const pushLog = useCallback((msg) => setLog((l) => [...l.slice(-40), msg]), []);
 
+  // ---- Multiplayer bay privacy: after a placement, keep showing that
+  // exact (now-outdated) bay content for a moment, fading it out, rather
+  // than snapping straight to hidden - the snapshot is captured at the
+  // moment of placement so what's fading out is always the side that just
+  // acted, never the next player's bay (which activeWs would otherwise
+  // already have switched to). ----
+  const [fadingWs, setFadingWs] = useState(null);
+  const fadeTimerRef = useRef(null);
+  function triggerBayFade(ws) {
+    if (mode !== "local") return;
+    if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
+    setFadingWs(ws);
+    fadeTimerRef.current = setTimeout(() => setFadingWs(null), 900);
+  }
+
   // True when it's a real person's turn to act on THIS device: always true
   // for "player" (that's always a human), and also true for "ai" whenever
   // we're in local pass-and-play mode (that's the second human).
@@ -1957,6 +1972,8 @@ export default function RobotWars() {
     setFinalChanceUsed(false);
     setBattle(null);
     setRevealCount(0);
+    if (fadeTimerRef.current) clearTimeout(fadeTimerRef.current);
+    setFadingWs(null);
   }
 
   // Starts a same-device, pass-and-play match: two people take turns on
@@ -2027,6 +2044,7 @@ export default function RobotWars() {
       if (ws[bayIndex][slotType] !== null) return; // must be empty
       const next = ws.map((r, i) => (i === bayIndex ? { ...r, [slotType]: drawnPart } : r));
       setWs(next);
+      triggerBayFade(next);
       setDrawnPart(null);
       SFX.place();
       if (TYPES.every((t) => next[bayIndex][t] !== null)) playColorChime(next[bayIndex]);
@@ -2043,6 +2061,7 @@ export default function RobotWars() {
       const old = ws[bayIndex][slotType];
       const next = ws.map((r, i) => (i === bayIndex ? { ...r, [slotType]: drawnPart } : r));
       setWs(next);
+      triggerBayFade(next);
       if (old) setTable((t) => [...t, old]);
       SFX.swap();
       playColorChime(next[bayIndex]);
@@ -2643,10 +2662,10 @@ export default function RobotWars() {
            a much larger radius at the bottom that pulls both bottom
            corners inward into a curved point rather than a flat edge. */
         .pick-bag {
-          width: 90px;
+          width: 116px;
           height: 75%;
           background: #845d49;
-          color: #ffffff;
+          color: rgba(255, 255, 255, 0.85);
           font-size: 13px;
           font-weight: bold;
           line-height: 2;
@@ -2656,6 +2675,33 @@ export default function RobotWars() {
           border-radius: 8px 8px 42% 42% / 8px 8px 24% 24%;
           box-shadow: inset 5px 0 0 0 rgba(255, 255, 255, 0.16);
           position: relative;
+        }
+        .pick-bag-player {
+          font-size: 11px;
+          letter-spacing: 0.06em;
+          color: #ffffff;
+          animation: pickBagPulse 1.4s ease-in-out infinite;
+        }
+        @keyframes pickBagPulse {
+          0%,
+          100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0.35;
+          }
+        }
+        .bay-fade-out {
+          animation: bayFadeOut 900ms ease forwards;
+        }
+        @keyframes bayFadeOut {
+          0%,
+          55% {
+            opacity: 1;
+          }
+          100% {
+            opacity: 0;
+          }
         }
         .pick-bag::before {
           content: "";
@@ -2834,15 +2880,6 @@ export default function RobotWars() {
               <line x1="3" y1="18" x2="21" y2="18" />
             </svg>
           </button>
-          {mode === "local" && (
-            <div
-              className="absolute right-0 top-1/2 -translate-y-1/2 text-[10px] tracking-[0.15em] px-2 py-1 rounded"
-              style={{ background: "#0c0d10", color: "#7fd0ff", border: "1px solid #2a2c33" }}
-              title="Pass-and-play: two people take turns on this device"
-            >
-              PASS & PLAY · {isPlayerTurn ? "P1" : "P2"}
-            </div>
-          )}
         </div>
 
         {phase !== 3 && (
@@ -2894,6 +2931,7 @@ export default function RobotWars() {
                     <div className="flex items-center justify-center h-full">
                       {mode === "local" && (isPlayerTurn || isOpponentHumanTurn) && bag.length > 0 ? (
                         <button onClick={() => playerDrawFrom("bag")} className="pick-bag shrink-0 self-center">
+                          {mode === "local" && <div className="pick-bag-player">{isPlayerTurn ? "PLAYER 1" : "PLAYER 2"}</div>}
                           <div>PICK</div>
                           <div>PART</div>
                           <div>FROM</div>
@@ -2947,6 +2985,7 @@ export default function RobotWars() {
                         disabled={bag.length === 0}
                         className="pick-bag shrink-0 self-center disabled:opacity-40"
                       >
+                        {mode === "local" && <div className="pick-bag-player">{isPlayerTurn ? "PLAYER 1" : "PLAYER 2"}</div>}
                         <div>PICK</div>
                         <div>PART</div>
                         <div>FROM</div>
@@ -3070,23 +3109,44 @@ export default function RobotWars() {
             {/* Active workshop - normally always the player's own bays, but
                 in local pass-and-play this shows whichever human's turn it
                 currently is (see activeWs), since both sides now take real
-                turns on this one screen. */}
+                turns on this one screen. It's also kept hidden there until
+                a part has actually been drawn, so whoever is handing the
+                device over never gets a free look at the other player's
+                bay in between turns. Right after placing, rather than
+                snapping straight to hidden, it briefly holds on the
+                frozen snapshot of what was just placed (fadingWs, captured
+                at the moment of placement so it's never the NEXT player's
+                bay) and fades that out. */}
             <div className="mb-6">
-              <div className="flex gap-1 sm:gap-3 justify-center overflow-x-auto pb-2">
-                {activeWs.map((robot, i) => (
-                  <RobotBay
-                    key={i}
-                    robot={robot}
-                    bayIndex={i}
-                    onSlotClick={handleSlotClickWithFlight}
-                    registerSlotRef={(bay, type, el) => {
-                      slotRefs.current[`${bay}-${type}`] = el;
-                    }}
-                    highlightEmpty={phase === 1 && !!drawnPart}
-                    swapMode={phase === 2 && !!drawnPart}
-                  />
-                ))}
-              </div>
+              {mode === "local" && !drawnPart ? (
+                fadingWs ? (
+                  <div className="flex gap-1 sm:gap-3 justify-center overflow-x-auto pb-2 bay-fade-out">
+                    {fadingWs.map((robot, i) => (
+                      <RobotBay key={i} robot={robot} bayIndex={i} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center text-center text-xs text-zinc-500 italic" style={{ height: "132px" }}>
+                    Bay hidden - click the bag to reveal it
+                  </div>
+                )
+              ) : (
+                <div className="flex gap-1 sm:gap-3 justify-center overflow-x-auto pb-2">
+                  {activeWs.map((robot, i) => (
+                    <RobotBay
+                      key={i}
+                      robot={robot}
+                      bayIndex={i}
+                      onSlotClick={handleSlotClickWithFlight}
+                      registerSlotRef={(bay, type, el) => {
+                        slotRefs.current[`${bay}-${type}`] = el;
+                      }}
+                      highlightEmpty={phase === 1 && !!drawnPart}
+                      swapMode={phase === 2 && !!drawnPart}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
 
             {phase === 2 && phase2Overlay !== "finalChance" && (
